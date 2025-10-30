@@ -1,0 +1,612 @@
+diff --git a/.env.example b/.env.example
+index 15b0b3f5c..2df817d95 100644
+--- a/.env.example
++++ b/.env.example
+@@ -31,7 +31,7 @@ NEXT_PRIVATE_DATABASE_URL="postgres://documenso:password@127.0.0.1:54320/documen
+ NEXT_PRIVATE_DIRECT_DATABASE_URL="postgres://documenso:password@127.0.0.1:54320/documenso"
+ 
+ # [[SIGNING]]
+-# The transport to use for document signing. Available options: local (default) | gcloud-hsm
++# The transport to use for document signing. Available options: local (default) | gcloud-hsm | trusted-signatures
+ NEXT_PRIVATE_SIGNING_TRANSPORT="local"
+ # OPTIONAL: The passphrase to use for the local file-based signing transport.
+ NEXT_PRIVATE_SIGNING_PASSPHRASE=
+@@ -47,6 +47,10 @@ NEXT_PRIVATE_SIGNING_GCLOUD_HSM_PUBLIC_CRT_FILE_PATH=
+ NEXT_PRIVATE_SIGNING_GCLOUD_HSM_PUBLIC_CRT_FILE_CONTENTS=
+ # OPTIONAL: The path to the Google Cloud Credentials file to use for the gcloud-hsm signing transport.
+ NEXT_PRIVATE_SIGNING_GCLOUD_APPLICATION_CREDENTIALS_CONTENTS=
++# OPTIONAL: The Trusted Signatures API Key ID.
++NEXT_PRIVATE_SIGNING_TS_API_KEY_ID=
++# OPTIONAL: The Trusted Signatures API Key.
++NEXT_PRIVATE_SIGNING_TS_API_KEY=
+ 
+ # [[STORAGE]]
+ # OPTIONAL: Defines the storage transport to use. Available options: database (default) | s3
+diff --git a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+index d655fa806..1112b5233 100644
+--- a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
++++ b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+@@ -65,3 +65,52 @@ Configure your instance to use the new certificate by configuring the following
+ | `NEXT_PRIVATE_SIGNING_GCLOUD_ APPLICATION_CREDENTIALS_CONTENTS` | The Google Cloud Credentials file path for the gcloud-hsm signing transport. This field is optional.                                      |
+ 
+ </Steps>
++
++## Using Trusted Signatures
++
++Trusted Signatures is a cloud-based signing service that provides Adobe-trusted digital signatures without
++the need to manage your own certificates or HSM infrastructure.
++
++### Benefits
++
++- Adobe-trusted signatures with green checkmark in PDF readers
++- No need to purchase or manage your own certificates
++- Secure cloud-based HSM for key storage
++- Pay-as-you-go pricing
++
++### Technical Process
++
++<Steps>
++
++### Sign up for Trusted Signatures
++
++Create an account at [trusted-signatures.com](https://trusted-signatures.com) and create an API Key. You can
++use a test certificate for free (but it is self-signed), or you can sign up and use an AATL and eIDAS approved
++certificate for a small fee.
++
++### Configure Documenso to use Trusted Signatures
++
++Configure your instance to use Trusted Signatures by adding the following environment variables to your `.env` file:
++
++| Environment Variable                 | Description                                                       |
++| :----------------------------------- | :---------------------------------------------------------------- |
++| `NEXT_PRIVATE_SIGNING_TRANSPORT`     | Set to `trusted-signatures` to use the Trusted Signatures service |
++| `NEXT_PRIVATE_SIGNING_TS_API_KEY_ID` | Your Trusted Signatures API Key ID                                |
++| `NEXT_PRIVATE_SIGNING_TS_API_KEY`    | Your Trusted Signatures API Key (in hexadecimal format)           |
++
++### Test your integration
++
++Send a test document through your Documenso instance to verify the integration is working correctly.
++If you used an API Key associated with a test certificate, the document will be signed but will the
++certificate will not be recognized.
++
++If you used our AATL/eIDAS signing key, the signed document should display a green checkmark in Adobe Reader
++and other PDF viewers that recognize Adobe-trusted certificates.
++
++</Steps>
++
++<Callout type="info" emoji="ℹ️">
++  Trusted Signatures is a paid service with various pricing tiers based on your signing volume.
++  Visit [trusted-signatures.com/pricing](https://trusted-signatures.com/pricing) for current pricing
++  information.
++</Callout>
+diff --git a/packages/signing/index.ts b/packages/signing/index.ts
+index 48afcbdba..dbac1ec49 100644
+--- a/packages/signing/index.ts
++++ b/packages/signing/index.ts
+@@ -4,6 +4,7 @@ import { env } from '@documenso/lib/utils/env';
+ 
+ import { signWithGoogleCloudHSM } from './transports/google-cloud-hsm';
+ import { signWithLocalCert } from './transports/local-cert';
++import { signWithTrustedSignatures } from './transports/trusted-signatures';
+ 
+ export type SignOptions = {
+   pdf: Buffer;
+@@ -15,6 +16,7 @@ export const signPdf = async ({ pdf }: SignOptions) => {
+   return await match(transport)
+     .with('local', async () => signWithLocalCert({ pdf }))
+     .with('gcloud-hsm', async () => signWithGoogleCloudHSM({ pdf }))
++    .with('trusted-signatures', async () => signWithTrustedSignatures({ pdf }))
+     .otherwise(() => {
+       throw new Error(`Unsupported signing transport: ${transport}`);
+     });
+diff --git a/packages/signing/transports/trusted-signatures.test.ts b/packages/signing/transports/trusted-signatures.test.ts
+new file mode 100644
+index 000000000..301ca11d0
+--- /dev/null
++++ b/packages/signing/transports/trusted-signatures.test.ts
+@@ -0,0 +1,138 @@
++/* eslint-disable @typescript-eslint/consistent-type-assertions */
++import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
++import crypto from 'crypto';
++import { calculateAuthorizationToken, requestSignatureFromAPI } from './trusted-signatures';
++
++// Mock the fetch function
++global.fetch = vi.fn();
++
++// Mock crypto
++vi.mock('crypto', () => ({
++  default: {
++    createHmac: vi.fn(),
++  },
++}));
++
++describe('calculateAuthorizationToken', () => {
++  let mockHmac: { update: unknown; digest: unknown; };
++
++  beforeEach(() => {
++    // Reset all mocks before each test
++    vi.clearAllMocks();
++
++    // Setup mock HMAC
++    mockHmac = {
++      update: vi.fn().mockReturnThis(),
++      digest: vi.fn().mockReturnValue(Buffer.from('mock-hmac-digest')),
++    };
++
++    (crypto.createHmac as Mock).mockReturnValue(mockHmac);
++  });
++
++  it('should create HMAC with correct parameters', () => {
++    const apiKey = Buffer.from('test-api-key');
++    const message = 'test-message';
++    const timeAsIso8601String = '2023-12-25T12:00:00Z';
++
++    calculateAuthorizationToken({ apiKey, message, timeAsIso8601String });
++
++    expect(crypto.createHmac).toHaveBeenCalledWith('sha256', Uint8Array.from(apiKey));
++    expect(mockHmac.update).toHaveBeenCalledWith(message);
++    expect(mockHmac.update).toHaveBeenCalledWith(timeAsIso8601String);
++    expect(mockHmac.digest).toHaveBeenCalled();
++  });
++
++  it('should return the correct digest', () => {
++    const apiKey = Buffer.from('test-api-key');
++    const message = 'test-message';
++    const timeAsIso8601String = '2023-12-25T12:00:00Z';
++
++    const result = calculateAuthorizationToken({ apiKey, message, timeAsIso8601String });
++
++    expect(result).toEqual(Buffer.from('mock-hmac-digest'));
++  });
++});
++
++describe('requestSignatureFromAPI', () => {
++  const mockApiKeyId = 'test-api-key-id';
++  const mockApiKey = Buffer.from('test-api-key');
++  const mockDigest = Buffer.from('test-digest');
++
++  beforeEach(() => {
++    vi.clearAllMocks();
++    vi.useFakeTimers();
++  });
++
++  it('should make correct API call with proper headers', async () => {
++    const mockResponse = {
++      ok: true,
++      json: async () => Promise.resolve({ signature: 'mock-signature' })
++    };
++    (global.fetch as Mock).mockResolvedValueOnce(mockResponse);
++
++    // Set a fixed date for testing
++    const fixedDate = new Date('2023-12-25T12:00:00Z');
++    vi.setSystemTime(fixedDate);
++
++    await requestSignatureFromAPI({ apiKeyId: mockApiKeyId, apiKey: mockApiKey, digest: mockDigest });
++
++    expect(global.fetch).toHaveBeenCalledWith(
++      'https://api.trusted-signatures.com/v1/sign',
++      expect.objectContaining({
++        method: 'POST',
++        headers: expect.objectContaining({
++          'User-Agent': 'Documenso',
++          'Content-Type': 'application/json',
++          'X-Authorization-Key': mockApiKeyId,
++          'X-Authorization-Algorithm': 'HmacSHA256',
++          'X-Authorization-Time': fixedDate.toISOString(),
++        }),
++      })
++    );
++  });
++
++  it('should return correct signature from API response', async () => {
++    const mockSignature = 'mock-signature';
++    const mockResponse = {
++      ok: true,
++      json: async () => Promise.resolve({ signature: mockSignature })
++    };
++    (global.fetch as Mock).mockResolvedValueOnce(mockResponse);
++
++    const result = await requestSignatureFromAPI({
++      apiKeyId: mockApiKeyId,
++      apiKey: mockApiKey,
++      digest: mockDigest
++    });
++
++    expect(result).toEqual(Buffer.from(mockSignature, 'base64'));
++  });
++
++  it('should throw error when API response is not ok', async () => {
++    const mockResponse = {
++      ok: false,
++      status: 400
++    };
++    (global.fetch as Mock).mockResolvedValueOnce(mockResponse);
++
++    await expect(
++      requestSignatureFromAPI({
++        apiKeyId: mockApiKeyId,
++        apiKey: mockApiKey,
++        digest: mockDigest
++      })
++    ).rejects.toThrow('HTTP error! Status: 400');
++  });
++
++  it('should handle network errors', async () => {
++    (global.fetch as Mock).mockRejectedValueOnce(new Error('Network error'));
++
++    await expect(
++      requestSignatureFromAPI({
++        apiKeyId: mockApiKeyId,
++        apiKey: mockApiKey,
++        digest: mockDigest
++      })
++    ).rejects.toThrow('Network error');
++  });
++});
+diff --git a/packages/signing/transports/trusted-signatures.ts b/packages/signing/transports/trusted-signatures.ts
+new file mode 100644
+index 000000000..d16b396a2
+--- /dev/null
++++ b/packages/signing/transports/trusted-signatures.ts
+@@ -0,0 +1,176 @@
++import crypto from 'crypto';
++
++import { env } from '@documenso/lib/utils/env';
++
++import { addSigningPlaceholder } from '../helpers/add-signing-placeholder';
++import { updateSigningPlaceholder } from '../helpers/update-signing-placeholder';
++
++export type SignWithTrustedSignaturesOptions = {
++  pdf: Buffer;
++};
++
++export const signWithTrustedSignatures = async ({ pdf }: SignWithTrustedSignaturesOptions) => {
++  const apiKeyId = env('NEXT_PRIVATE_SIGNING_TS_API_KEY_ID');
++
++  if (!apiKeyId) {
++    throw new Error('No API Key ID found for Trusted Signatures Signing');
++  }
++  const apiKeyHex = env('NEXT_PRIVATE_SIGNING_TS_API_KEY');
++
++  if (!apiKeyHex) {
++    throw new Error('No API Key found for Trusted Signatures Signing');
++  }
++
++  const apiKey = Buffer.from(apiKeyHex, 'hex');
++
++  const { pdf: pdfWithPlaceholder, byteRange } = updateSigningPlaceholder({
++    pdf: await addSigningPlaceholder({ pdf }),
++  });
++
++  const pdfWithoutSignature = Buffer.concat([
++    new Uint8Array(pdfWithPlaceholder.subarray(0, byteRange[1])),
++    new Uint8Array(pdfWithPlaceholder.subarray(byteRange[2])),
++  ]);
++
++  const signatureLength = byteRange[2] - byteRange[1];
++
++  const signature = await getPdfDigest({
++    apiKeyId,
++    apiKey,
++    content: pdfWithoutSignature,
++  });
++
++  const signatureAsHex = signature.toString('hex');
++
++  const signedPdf = Buffer.concat([
++    new Uint8Array(pdfWithPlaceholder.subarray(0, byteRange[1])),
++    new Uint8Array(Buffer.from(`<${signatureAsHex.padEnd(signatureLength - 2, '0')}>`)),
++    new Uint8Array(pdfWithPlaceholder.subarray(byteRange[2])),
++  ]);
++
++  return signedPdf;
++};
++
++const calculateSHA256Digest = (pdfBuffer: Buffer) => {
++  return crypto.createHash('sha256').update(Uint8Array.from(pdfBuffer)).digest();
++};
++
++/**
++ * Use the API Key to generate an HMAC-SHA256 digest that is used to authenticate the caller.
++ * This authenticates the message and the sender. This must generate exactly the same bits
++ * on the server.
++ *
++ * @param {*} message The message we want to sign
++ * @returns the HMAC-SHA256(api-key, (request body + time)) where `request body` and `time`
++ *    are the UTF-8 bytes of the body of the HTTP request and the time in the `X-Authorization-Time` header
++ */
++export const calculateAuthorizationToken = ({
++  apiKey,
++  message,
++  timeAsIso8601String,
++}: {
++  apiKey: Buffer;
++  message: string;
++  timeAsIso8601String: string;
++}) => {
++  // convert apiKey to Uint8Array
++
++  const hash = crypto.createHmac('sha256', Uint8Array.from(apiKey));
++  hash.update(message);
++  hash.update(timeAsIso8601String);
++  return hash.digest();
++};
++
++/**
++ * Send a signing request to the endpoint.
++ *
++ * @param {*} apiKeyId The UUID API Key ID
++ * @param {*} message The message bytes we're sending
++ * @param {*} hmac The HMAC-SHA256 authorization header
++ * @param {*} timeAsIso8601String The current time used in calculating the hmac
++ * @returns The response from the server (should be JSON)
++ */
++const sendMessageForSignature = async ({
++  apiKeyId,
++  message,
++  hmac,
++  timeAsIso8601String,
++}: {
++  apiKeyId: string;
++  message: string;
++  hmac: Buffer;
++  timeAsIso8601String: string;
++}) => {
++  const url = 'https://api.trusted-signatures.com/v1/sign';
++  const headers = {
++    'User-Agent': 'Documenso',
++    'Content-Type': 'application/json',
++    'X-Authorization': hmac.toString('base64'),
++    'X-Authorization-Time': timeAsIso8601String,
++    'X-Authorization-Key': apiKeyId,
++    'X-Authorization-Algorithm': 'HmacSHA256',
++  };
++
++  try {
++    const response = await fetch(url, {
++      method: 'POST',
++      headers,
++      body: message,
++    });
++
++    if (!response.ok) {
++      throw new Error(`HTTP error! Status: ${response.status}`);
++    }
++
++    return await response.json();
++  } catch (e) {
++    console.error('Response:', e);
++    throw e;
++  }
++};
++
++// invoke our remote signing API, which uses an HSM to sign the digest and returns a DER of the
++// signature, including the certificate chain, to be inserted back into the PDF
++
++// Request MUST include the following headers to authenticate:
++// 1. X-Authorization-Time: the current ISO-8601 time
++// 2. X-Authorization-Key: the ID of the api key
++// 3. X-Authorization: the authorization HMAC
++export const requestSignatureFromAPI = async ({
++  apiKeyId,
++  apiKey,
++  digest,
++}: {
++  apiKeyId: string;
++  apiKey: Buffer;
++  digest: Buffer;
++}) => {
++  const base64Digest = digest.toString('base64');
++  const timeAsIso8601String = new Date().toISOString();
++  const message = JSON.stringify({
++    digestAlgorithm: 'SHA256',
++    digest: base64Digest,
++  });
++  const hmac = calculateAuthorizationToken({ apiKey, message, timeAsIso8601String });
++
++  const response = await sendMessageForSignature({ message, hmac, timeAsIso8601String, apiKeyId });
++
++  const base64Signature = response.signature;
++  const bytes = Buffer.from(base64Signature, 'base64');
++  return bytes;
++};
++
++const getPdfDigest = async ({
++  apiKeyId,
++  apiKey,
++  content,
++}: {
++  apiKeyId: string;
++  apiKey: Buffer;
++  content: Buffer;
++}) => {
++  const digest = calculateSHA256Digest(content);
++  const signature = await requestSignatureFromAPI({ apiKeyId, apiKey, digest });
++
++  return signature;
++};
+diff --git a/packages/tsconfig/process-env.d.ts b/packages/tsconfig/process-env.d.ts
+index 143dbe30d..ee74b8d62 100644
+--- a/packages/tsconfig/process-env.d.ts
++++ b/packages/tsconfig/process-env.d.ts
+@@ -29,7 +29,7 @@ declare namespace NodeJS {
+     NEXT_PRIVATE_UPLOAD_DISTRIBUTION_KEY_ID?: string;
+     NEXT_PRIVATE_UPLOAD_DISTRIBUTION_KEY_CONTENTS?: string;
+ 
+-    NEXT_PRIVATE_SIGNING_TRANSPORT?: 'local' | 'http' | 'gcloud-hsm';
++    NEXT_PRIVATE_SIGNING_TRANSPORT?: 'local' | 'http' | 'gcloud-hsm' | 'trusted-signatures';
+     NEXT_PRIVATE_SIGNING_PASSPHRASE?: string;
+     NEXT_PRIVATE_SIGNING_LOCAL_FILE_PATH?: string;
+     NEXT_PRIVATE_SIGNING_LOCAL_FILE_CONTENTS?: string;
+@@ -38,6 +38,8 @@ declare namespace NodeJS {
+     NEXT_PRIVATE_SIGNING_GCLOUD_HSM_PUBLIC_CRT_FILE_PATH?: string;
+     NEXT_PRIVATE_SIGNING_GCLOUD_HSM_PUBLIC_CRT_FILE_CONTENTS?: string;
+     NEXT_PRIVATE_SIGNING_GCLOUD_APPLICATION_CREDENTIALS_CONTENTS?: string;
++    NEXT_PRIVATE_SIGNING_TS_API_KEY_ID?: string;
++    NEXT_PRIVATE_SIGNING_TS_API_KEY?: string;
+ 
+     NEXT_PRIVATE_SMTP_TRANSPORT?: 'mailchannels' | 'resend' | 'smtp-auth' | 'smtp-api';
+ 
+diff --git a/.env.example b/.env.example
+index 7437ebbf3..47563bbc8 100644
+--- a/.env.example
++++ b/.env.example
+@@ -51,6 +51,8 @@ NEXT_PRIVATE_SIGNING_GCLOUD_APPLICATION_CREDENTIALS_CONTENTS=
+ NEXT_PRIVATE_SIGNING_TS_API_KEY_ID=
+ # OPTIONAL: The Trusted Signatures API Key.
+ NEXT_PRIVATE_SIGNING_TS_API_KEY=
++# OPTIONAL: Include a TSA timestamp in the signature
++NEXT_PRIVATE_SIGNING_TS_TIMESTAMP=
+ 
+ # [[STORAGE]]
+ # OPTIONAL: Defines the storage transport to use. Available options: database (default) | s3
+diff --git a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+index 1112b5233..2be9895c1 100644
+--- a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
++++ b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+@@ -97,6 +97,7 @@ Configure your instance to use Trusted Signatures by adding the following enviro
+ | `NEXT_PRIVATE_SIGNING_TRANSPORT`     | Set to `trusted-signatures` to use the Trusted Signatures service |
+ | `NEXT_PRIVATE_SIGNING_TS_API_KEY_ID` | Your Trusted Signatures API Key ID                                |
+ | `NEXT_PRIVATE_SIGNING_TS_API_KEY`    | Your Trusted Signatures API Key (in hexadecimal format)           |
++| `NEXT_PRIVATE_SIGNING_TS_TIMESTAMP`  | Set to `true` to include a TSA timestamp in the signature         |
+ 
+ ### Test your integration
+ 
+diff --git a/packages/signing/transports/trusted-signatures.test.ts b/packages/signing/transports/trusted-signatures.test.ts
+index 301ca11d0..f71fb39b9 100644
+--- a/packages/signing/transports/trusted-signatures.test.ts
++++ b/packages/signing/transports/trusted-signatures.test.ts
+@@ -74,7 +74,7 @@ describe('requestSignatureFromAPI', () => {
+     const fixedDate = new Date('2023-12-25T12:00:00Z');
+     vi.setSystemTime(fixedDate);
+ 
+-    await requestSignatureFromAPI({ apiKeyId: mockApiKeyId, apiKey: mockApiKey, digest: mockDigest });
++    await requestSignatureFromAPI({ apiKeyId: mockApiKeyId, apiKey: mockApiKey, digest: mockDigest, tsaTimestamp: false });
+ 
+     expect(global.fetch).toHaveBeenCalledWith(
+       'https://api.trusted-signatures.com/v1/sign',
+@@ -102,7 +102,8 @@ describe('requestSignatureFromAPI', () => {
+     const result = await requestSignatureFromAPI({
+       apiKeyId: mockApiKeyId,
+       apiKey: mockApiKey,
+-      digest: mockDigest
++      digest: mockDigest,
++      tsaTimestamp: false,
+     });
+ 
+     expect(result).toEqual(Buffer.from(mockSignature, 'base64'));
+@@ -119,7 +120,8 @@ describe('requestSignatureFromAPI', () => {
+       requestSignatureFromAPI({
+         apiKeyId: mockApiKeyId,
+         apiKey: mockApiKey,
+-        digest: mockDigest
++        digest: mockDigest,
++        tsaTimestamp: false,
+       })
+     ).rejects.toThrow('HTTP error! Status: 400');
+   });
+@@ -131,7 +133,8 @@ describe('requestSignatureFromAPI', () => {
+       requestSignatureFromAPI({
+         apiKeyId: mockApiKeyId,
+         apiKey: mockApiKey,
+-        digest: mockDigest
++        digest: mockDigest,
++        tsaTimestamp: false,
+       })
+     ).rejects.toThrow('Network error');
+   });
+diff --git a/packages/signing/transports/trusted-signatures.ts b/packages/signing/transports/trusted-signatures.ts
+index d16b396a2..47c6ec235 100644
+--- a/packages/signing/transports/trusted-signatures.ts
++++ b/packages/signing/transports/trusted-signatures.ts
+@@ -21,6 +21,8 @@ export const signWithTrustedSignatures = async ({ pdf }: SignWithTrustedSignatur
+     throw new Error('No API Key found for Trusted Signatures Signing');
+   }
+ 
++  const tsaTimestamp = env('NEXT_PRIVATE_SIGNING_TS_TIMESTAMP') === 'true';
++
+   const apiKey = Buffer.from(apiKeyHex, 'hex');
+ 
+   const { pdf: pdfWithPlaceholder, byteRange } = updateSigningPlaceholder({
+@@ -38,6 +40,7 @@ export const signWithTrustedSignatures = async ({ pdf }: SignWithTrustedSignatur
+     apiKeyId,
+     apiKey,
+     content: pdfWithoutSignature,
++    tsaTimestamp,
+   });
+ 
+   const signatureAsHex = signature.toString('hex');
+@@ -140,16 +143,19 @@ export const requestSignatureFromAPI = async ({
+   apiKeyId,
+   apiKey,
+   digest,
++  tsaTimestamp,
+ }: {
+   apiKeyId: string;
+   apiKey: Buffer;
+   digest: Buffer;
++  tsaTimestamp: boolean;
+ }) => {
+   const base64Digest = digest.toString('base64');
+   const timeAsIso8601String = new Date().toISOString();
+   const message = JSON.stringify({
+     digestAlgorithm: 'SHA256',
+     digest: base64Digest,
++    tsaTimestamp,
+   });
+   const hmac = calculateAuthorizationToken({ apiKey, message, timeAsIso8601String });
+ 
+@@ -164,13 +170,15 @@ const getPdfDigest = async ({
+   apiKeyId,
+   apiKey,
+   content,
++  tsaTimestamp,
+ }: {
+   apiKeyId: string;
+   apiKey: Buffer;
+   content: Buffer;
++  tsaTimestamp: boolean;
+ }) => {
+   const digest = calculateSHA256Digest(content);
+-  const signature = await requestSignatureFromAPI({ apiKeyId, apiKey, digest });
++  const signature = await requestSignatureFromAPI({ apiKeyId, apiKey, digest, tsaTimestamp });
+ 
+   return signature;
+ };
+diff --git a/packages/tsconfig/process-env.d.ts b/packages/tsconfig/process-env.d.ts
+index 416eda4f4..e4fc7fe74 100644
+--- a/packages/tsconfig/process-env.d.ts
++++ b/packages/tsconfig/process-env.d.ts
+@@ -42,6 +42,7 @@ declare namespace NodeJS {
+     NEXT_PRIVATE_SIGNING_GCLOUD_APPLICATION_CREDENTIALS_CONTENTS?: string;
+     NEXT_PRIVATE_SIGNING_TS_API_KEY_ID?: string;
+     NEXT_PRIVATE_SIGNING_TS_API_KEY?: string;
++    NEXT_PRIVATE_SIGNING_TS_TIMESTAMP?: boolean;
+ 
+     NEXT_PRIVATE_SMTP_TRANSPORT?: 'mailchannels' | 'resend' | 'smtp-auth' | 'smtp-api';
+ 
+diff --git a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+index 2be9895c1..a307a9028 100644
+--- a/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
++++ b/apps/documentation/pages/developers/self-hosting/signing-certificate.mdx
+@@ -102,7 +102,7 @@ Configure your instance to use Trusted Signatures by adding the following enviro
+ ### Test your integration
+ 
+ Send a test document through your Documenso instance to verify the integration is working correctly.
+-If you used an API Key associated with a test certificate, the document will be signed but will the
++If you used an API Key associated with a test certificate, the document will be signed but the
+ certificate will not be recognized.
+ 
+ If you used our AATL/eIDAS signing key, the signed document should display a green checkmark in Adobe Reader
+diff --git a/packages/signing/transports/trusted-signatures.test.ts b/packages/signing/transports/trusted-signatures.test.ts
+index f71fb39b9..77cf8d05f 100644
+--- a/packages/signing/transports/trusted-signatures.test.ts
++++ b/packages/signing/transports/trusted-signatures.test.ts
+@@ -83,6 +83,7 @@ describe('requestSignatureFromAPI', () => {
+         headers: expect.objectContaining({
+           'User-Agent': 'Documenso',
+           'Content-Type': 'application/json',
++          'X-Authorization': expect.any(String),
+           'X-Authorization-Key': mockApiKeyId,
+           'X-Authorization-Algorithm': 'HmacSHA256',
+           'X-Authorization-Time': fixedDate.toISOString(),

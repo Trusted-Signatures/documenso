@@ -1,0 +1,225 @@
+name: Track upstream releases and rebase/apply TS changes
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '17 7 * * *' # daily 07:17 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up git identity
+        run: |
+          git config user.name  "actions-bot"
+          git config user.email "actions-bot@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch tags
+        run: |
+          git remote add upstream https://github.com/documenso/documenso.git || true
+          git fetch upstream --tags --prune
+
+      - name: Show latest upstream tags
+        run: |
+          echo "Latest upstream tags:"
+          git tag -l --sort=-creatordate | head -n 20
+
+      - name: Run tracker (rebase/cherry-pick mode by default)
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TS_SUFFIX="-ts.1"
+          PATCH_MODE="${PATCH_MODE:-0}"   # set to 1 to use patch files instead of commits
+          PATCH_GLOB="${PATCH_GLOB:-patches/*.patch}"
+
+          # Ensure ts/patches exists (your linear change branch)
+          if ! git rev-parse --verify ts/patches >/dev/null 2>&1; then
+            echo "::error::Missing branch ts/patches (create it with your commits)."
+            exit 1
+          fi
+
+          # Find the base (where your patch stack branched off upstream)
+          git fetch upstream main
+          BASE=$(git merge-base ts/patches upstream/main)
+          echo "BASE commit: $BASE"
+
+          # Get your patch stack commits in order
+          COMMITS=$(git rev-list --reverse "${BASE}..ts/patches" || true)
+          if [ -z "${COMMITS}" ] && [ "${PATCH_MODE}" = "0" ]; then
+            echo "No TS commits found; nothing to apply."
+          fi
+
+          # Iterate upstream tags; create a ts tag if missing
+          # We will only consider v*-looking tags; adjust if Documenso uses a different scheme
+          NEW_TAGS=0
+          SUCCESSFUL_RELEASES=""
+          CONFLICT_TAG=""
+          CONFLICT_BRANCH=""
+          
+          for TAG in $(git for-each-ref --sort=creatordate --format='%(refname:short)' refs/tags | grep -E '^v[0-9]'); do
+            OUT_TAG="${TAG}${TS_SUFFIX}"
+            if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then
+              echo "Already processed: ${OUT_TAG}"
+              continue
+            fi
+
+            echo "==> Processing upstream tag ${TAG}"
+            git switch --discard-changes --detach "${TAG}"
+
+            WORKBR="release/${TAG}-ts"
+            if git rev-parse --verify "${WORKBR}" >/dev/null 2>&1; then
+              git branch -D "${WORKBR}"
+            fi
+            git switch -c "${WORKBR}"
+
+            CONFLICT=0
+            if [ "${PATCH_MODE}" = "1" ]; then
+              echo "Applying patches from ${PATCH_GLOB}"
+              # Apply a saved patch series (created with git format-patch)
+              if ! ls ${PATCH_GLOB} >/dev/null 2>&1; then
+                echo "::error::No patch files found at ${PATCH_GLOB}"
+                exit 1
+              fi
+              # -3 enables 3-way merge; --keep-cr is helpful for mixed line endings
+              if ! git am -3 --keep-cr ${PATCH_GLOB}; then
+                CONFLICT=1
+                git am --abort || true
+              fi
+            else
+              echo "Cherry-picking TS commits onto ${TAG}"
+              for C in ${COMMITS}; do
+                if ! git cherry-pick -x --allow-empty "${C}"; then
+                  CONFLICT=1
+                  echo "Conflict cherry-picking ${C}"
+                  git cherry-pick --abort || true
+                  break
+                fi
+              done
+            fi
+
+            if [ "${CONFLICT}" = "1" ]; then
+              echo "Conflicts detected for ${TAG}; pushing branch and opening a PR."
+              git push origin "${WORKBR}:${WORKBR}"
+
+              # Store conflict info for later PR creation
+              CONFLICT_TAG="${TAG}"
+              CONFLICT_BRANCH="${WORKBR}"
+              continue
+            fi
+
+            # Optional: run your build/tests here before tagging
+            # e.g.,
+            # corepack enable
+            # corepack prepare pnpm@9 --activate
+            # pnpm i --frozen-lockfile
+            # pnpm -r build
+            # pnpm -r test
+
+            # Tag + push
+            git tag "${OUT_TAG}"
+            git push origin "${WORKBR}:${WORKBR}"
+            git push origin "refs/tags/${OUT_TAG}"
+
+            echo "Successfully processed: ${OUT_TAG}"
+            SUCCESSFUL_RELEASES="${SUCCESSFUL_RELEASES}${OUT_TAG}:${WORKBR}\n"
+            NEW_TAGS=$((NEW_TAGS+1))
+          done
+
+          echo "new_count=${NEW_TAGS}" >> $GITHUB_OUTPUT
+          echo "successful_releases<<EOF" >> $GITHUB_OUTPUT
+          echo -e "${SUCCESSFUL_RELEASES}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          if [ -n "${CONFLICT_TAG}" ]; then
+            echo "conflict_tag=${CONFLICT_TAG}" >> $GITHUB_OUTPUT
+            echo "conflict_branch=${CONFLICT_BRANCH}" >> $GITHUB_OUTPUT
+            echo "status=conflict" >> $GITHUB_OUTPUT
+          else
+            echo "status=ok" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR when conflicts occur
+        if: steps.run.outputs.status == 'conflict'
+        uses: actions/github-script@v7
+        env:
+          TAG: ${{ steps.run.outputs.conflict_tag }}
+          BRANCH: ${{ steps.run.outputs.conflict_branch }}
+        with:
+          script: |
+            const tag   = process.env.TAG;
+            const br    = process.env.BRANCH;
+            const { owner, repo } = context.repo;
+
+            // If there isn't already an open PR from this branch, create one.
+            const prs = await github.rest.pulls.list({
+              owner, repo, state: 'open', head: `${owner}:${br}`
+            });
+            if (prs.data.length === 0) {
+              await github.rest.pulls.create({
+                owner, repo,
+                title: `Resolve conflicts for ${tag}`,
+                head: br,
+                base: 'main',
+                body: `Automated rebase/apply onto upstream tag \`${tag}\` hit conflicts. Please resolve on \`${br}\`.`
+              });
+            } else {
+              core.info(`PR already exists for ${br}`);
+            }
+
+      - name: Create GitHub Releases and trigger publish workflows
+        if: steps.run.outputs.status == 'ok' && steps.run.outputs.new_count > 0
+        uses: actions/github-script@v7
+        env:
+          SUCCESSFUL_RELEASES: ${{ steps.run.outputs.successful_releases }}
+        with:
+          script: |
+            const releases = process.env.SUCCESSFUL_RELEASES.trim().split('\n').filter(line => line);
+            const { owner, repo } = context.repo;
+            
+            for (const release of releases) {
+              const [tagName, branch] = release.split(':');
+              if (!tagName || !branch) continue;
+              
+              try {
+                // Check if release already exists
+                await github.rest.repos.getReleaseByTag({ owner, repo, tag: tagName });
+                core.info(`Release for ${tagName} already exists.`);
+              } catch (e) {
+                // Create a new release
+                await github.rest.repos.createRelease({
+                  owner, repo,
+                  tag_name: tagName,
+                  target_commitish: branch,
+                  name: tagName,
+                  body: `Automated Trusted Signatures release based on upstream ${tagName.replace(/-ts.*$/, '')}`,
+                  draft: false,
+                  prerelease: false
+                });
+                core.info(`Created release ${tagName}`);
+              }
+              
+              // Trigger publish workflow for this release
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo,
+                  workflow_id: 'publish.yml',
+                  ref: branch
+                });
+                core.info(`Triggered publish workflow for ${tagName}`);
+              } catch (e) {
+                core.error(`Failed to trigger publish workflow for ${tagName}: ${e.message}`);
+              }
+            }

@@ -35,6 +35,27 @@ jobs:
           echo "Latest upstream tags:"
           git tag -l --sort=-creatordate | head -n 20
 
+      - name: Ensure ts/patches branch is available locally
+        run: |
+          set -euo pipefail
+          # Show remotes for debugging
+          git remote -v
+
+          # Try to fetch the branch from your fork (origin)
+          # This creates a local branch refs/heads/ts/patches pointing at origin's branch.
+          git fetch --no-tags origin ts/patches:ts/patches || true
+
+          # If still missing, see if it exists on origin as a head without being fetched
+          if ! git rev-parse --verify --quiet ts/patches; then
+            if git ls-remote --heads origin ts/patches | grep -q .; then
+              git fetch --no-tags origin ts/patches:ts/patches
+            else
+              echo "::error::Missing branch ts/patches on origin. Push it with:"
+              echo "  git push -u origin ts/patches"
+              exit 1
+            fi
+          fi
+
       - name: Run tracker (rebase/cherry-pick mode by default)
         id: run
         shell: bash

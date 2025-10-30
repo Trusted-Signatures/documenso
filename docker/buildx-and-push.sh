@@ -22,14 +22,11 @@ echo "App version: $APP_VERSION"
 echo "Git SHA: $GIT_SHA"
 
 docker buildx build \
-    -f "$SCRIPT_DIR/Dockerfile" \
-    --platform=$PLATFORM \
-    --progress=plain \
-    -t "documenso/documenso:latest" \
-    -t "documenso/documenso:$GIT_SHA" \
-    -t "documenso/documenso:$APP_VERSION" \
-    -t "ghcr.io/documenso/documenso:latest" \
-    -t "ghcr.io/documenso/documenso:$GIT_SHA" \
-    -t "ghcr.io/documenso/documenso:$APP_VERSION" \
-    --push \
-    "$MONOREPO_ROOT"
+-f "$SCRIPT_DIR/Dockerfile" \
+--platform=$PLATFORM \
+--progress=plain \
+-t "trustedsignatures/documenso:latest" \
+-t "trustedsignatures/documenso:$GIT_SHA" \
+-t "trustedsignatures/documenso:$APP_VERSION" \
+--push \
+"$MONOREPO_ROOT"

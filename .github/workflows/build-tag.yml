@@ -1,0 +1,107 @@
+name: Build Specific Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to build (e.g., v1.6.2-ts.1)'
+        required: true
+        type: string
+
+jobs:
+  build_and_publish_platform_containers:
+    name: Build and publish platform containers
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - warp-ubuntu-latest-x64-4x
+          - warp-ubuntu-latest-arm64-4x
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
+          fetch-tags: true
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build the docker image
+        env:
+          BUILD_PLATFORM: ${{ matrix.os == 'warp-ubuntu-latest-arm64-4x' && 'arm64' || 'amd64' }}
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)"
+
+          docker build \
+            -f ./docker/Dockerfile \
+            --progress=plain \
+            -t "trustedsignatures/documenso-$BUILD_PLATFORM:latest" \
+            -t "trustedsignatures/documenso-$BUILD_PLATFORM:$GIT_SHA" \
+            -t "trustedsignatures/documenso-$BUILD_PLATFORM:$TAG_NAME" \
+            .
+
+      - name: Push the docker image to DockerHub
+        run: docker push --all-tags "trustedsignatures/documenso-$BUILD_PLATFORM"
+        env:
+          BUILD_PLATFORM: ${{ matrix.os == 'warp-ubuntu-latest-arm64-4x' && 'arm64' || 'amd64' }}
+
+  create_and_publish_manifest:
+    name: Create and publish manifest
+    runs-on: ubuntu-latest
+    needs: build_and_publish_platform_containers
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
+          fetch-tags: true
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push DockerHub manifest
+        env:
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)"
+
+          # Check if the version is stable (no rc or beta in the version)
+          if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-ts\.[0-9]+$ ]]; then
+            docker manifest create \
+              trustedsignatures/documenso:latest \
+              --amend trustedsignatures/documenso-amd64:latest \
+              --amend trustedsignatures/documenso-arm64:latest
+
+            docker manifest push trustedsignatures/documenso:latest
+          fi
+
+          if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+-ts\.[0-9]+$ ]]; then
+            docker manifest create \
+              trustedsignatures/documenso:rc \
+              --amend trustedsignatures/documenso-amd64:rc \
+              --amend trustedsignatures/documenso-arm64:rc
+
+            docker manifest push trustedsignatures/documenso:rc
+          fi
+
+          docker manifest create \
+            trustedsignatures/documenso:$GIT_SHA \
+            --amend trustedsignatures/documenso-amd64:$GIT_SHA \
+            --amend trustedsignatures/documenso-arm64:$GIT_SHA
+
+          docker manifest create \
+            trustedsignatures/documenso:$TAG_NAME \
+            --amend trustedsignatures/documenso-amd64:$TAG_NAME \
+            --amend trustedsignatures/documenso-arm64:$TAG_NAME
+
+          docker manifest push trustedsignatures/documenso:$GIT_SHA
+          docker manifest push trustedsignatures/documenso:$TAG_NAME

@@ -1,9 +1,0 @@
-SCRIPT_DIR="$(readlink -f "$(dirname "$0")")"
-MONOREPO_ROOT="$(readlink -f "$SCRIPT_DIR/../")"
-
-echo "Copying .well-known/ contents"
-node "$MONOREPO_ROOT/scripts/copy-wellknown.cjs"
-
-git add "$MONOREPO_ROOT/apps/remix/public/"
-
-npx lint-staged

@@ -52,19 +52,24 @@ jobs:
         id: run
         shell: bash
         env:
-          PATCH_MODE: 1 # set to "1" in your workflow/env to use patch mode
+          PATCH_MODE: '1' # you're in patch mode
         run: |
           set -euo pipefail
 
           TS_SUFFIX="-ts.1"
           PATCH_MODE="${PATCH_MODE:-0}"
-          PATCH_GLOB="${PATCH_GLOB:-patches/*.patch}"
+          # Prefer the value exported by the prep step; otherwise fall back to repo path.
+          PATCH_GLOB="${PATCH_GLOB:-}"
+          if [ -z "${PATCH_GLOB}" ] && [ -d "$RUNNER_TEMP/ts_patches" ]; then
+            PATCH_GLOB="$RUNNER_TEMP/ts_patches/*.patch"
+          fi
+          : "${PATCH_GLOB:=patches/*.patch}"
+          echo "Using PATCH_GLOB=$PATCH_GLOB"
 
           git remote add upstream https://github.com/documenso/documenso.git 2>/dev/null || true
           git fetch upstream --tags --prune
 
           if [ "$PATCH_MODE" != "1" ]; then
-            # Only required in cherry-pick mode
             if ! git rev-parse --verify ts/patches >/dev/null 2>&1; then
               echo "::error::Missing branch ts/patches (create it with your commits)."
               exit 1
@@ -73,7 +78,6 @@ jobs:
             BASE=$(git merge-base ts/patches upstream/main)
             COMMITS=$(git rev-list --reverse "${BASE}..ts/patches" || true)
           else
-            # In patch mode, ensure PATCH_GLOB points to prepared files
             ls $PATCH_GLOB >/dev/null 2>&1 || { echo "::error::No patch files found via PATCH_GLOB=$PATCH_GLOB"; exit 1; }
           fi
 
@@ -106,7 +110,7 @@ jobs:
             fi
 
             if [ "${CONFLICT}" = "1" ]; then
-              echo "Conflicts for ${TAG}; pushing branch and opening PR."
+              echo "Conflicts for ${TAG}; pushing branch."
               git push origin "${WORKBR}:${WORKBR}"
               echo "tag=${TAG}"           >> $GITHUB_OUTPUT
               echo "branch=${WORKBR}"     >> $GITHUB_OUTPUT

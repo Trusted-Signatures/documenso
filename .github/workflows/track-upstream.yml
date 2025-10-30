@@ -18,6 +18,7 @@ jobs:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Set up git identity
@@ -35,61 +36,48 @@ jobs:
           echo "Latest upstream tags:"
           git tag -l --sort=-creatordate | head -n 20
 
-      - name: Ensure ts/patches branch is available locally
+      - name: Prepare patches (patch mode)
+        if: env.PATCH_MODE == '1'
         run: |
           set -euo pipefail
-          # Show remotes for debugging
-          git remote -v
+          mkdir -p "$RUNNER_TEMP/ts_patches"
+          shopt -s nullglob
+          # copy your repo's patches into a temp location outside the git worktree
+          cp -v patches/*.patch "$RUNNER_TEMP/ts_patches/" || {
+            echo "::error::No patch files found in patches/"; exit 1;
+          }
+          echo "PATCH_GLOB=$RUNNER_TEMP/ts_patches/*.patch" >> "$GITHUB_ENV"
 
-          # Try to fetch the branch from your fork (origin)
-          # This creates a local branch refs/heads/ts/patches pointing at origin's branch.
-          git fetch --no-tags origin ts/patches:ts/patches || true
-
-          # If still missing, see if it exists on origin as a head without being fetched
-          if ! git rev-parse --verify --quiet ts/patches; then
-            if git ls-remote --heads origin ts/patches | grep -q .; then
-              git fetch --no-tags origin ts/patches:ts/patches
-            else
-              echo "::error::Missing branch ts/patches on origin. Push it with:"
-              echo "  git push -u origin ts/patches"
-              exit 1
-            fi
-          fi
-
-      - name: Run tracker (rebase/cherry-pick mode by default)
+      - name: Run tracker (rebase/cherry-pick or patch mode)
         id: run
         shell: bash
+        env:
+          PATCH_MODE: 1 # set to "1" in your workflow/env to use patch mode
         run: |
           set -euo pipefail
 
           TS_SUFFIX="-ts.1"
-          PATCH_MODE="${PATCH_MODE:-1}"   # set to 1 to use patch files instead of commits
+          PATCH_MODE="${PATCH_MODE:-0}"
           PATCH_GLOB="${PATCH_GLOB:-patches/*.patch}"
 
-          # Ensure ts/patches exists (your linear change branch)
-          if ! git rev-parse --verify ts/patches >/dev/null 2>&1; then
-            echo "::error::Missing branch ts/patches (create it with your commits)."
-            exit 1
+          git remote add upstream https://github.com/documenso/documenso.git 2>/dev/null || true
+          git fetch upstream --tags --prune
+
+          if [ "$PATCH_MODE" != "1" ]; then
+            # Only required in cherry-pick mode
+            if ! git rev-parse --verify ts/patches >/dev/null 2>&1; then
+              echo "::error::Missing branch ts/patches (create it with your commits)."
+              exit 1
+            fi
+            git fetch upstream main
+            BASE=$(git merge-base ts/patches upstream/main)
+            COMMITS=$(git rev-list --reverse "${BASE}..ts/patches" || true)
+          else
+            # In patch mode, ensure PATCH_GLOB points to prepared files
+            ls $PATCH_GLOB >/dev/null 2>&1 || { echo "::error::No patch files found via PATCH_GLOB=$PATCH_GLOB"; exit 1; }
           fi
 
-          # Find the base (where your patch stack branched off upstream)
-          git fetch upstream main
-          BASE=$(git merge-base ts/patches upstream/main)
-          echo "BASE commit: $BASE"
-
-          # Get your patch stack commits in order
-          COMMITS=$(git rev-list --reverse "${BASE}..ts/patches" || true)
-          if [ -z "${COMMITS}" ] && [ "${PATCH_MODE}" = "0" ]; then
-            echo "No TS commits found; nothing to apply."
-          fi
-
-          # Iterate upstream tags; create a ts tag if missing
-          # We will only consider v*-looking tags; adjust if Documenso uses a different scheme
           NEW_TAGS=0
-          SUCCESSFUL_RELEASES=""
-          CONFLICT_TAG=""
-          CONFLICT_BRANCH=""
-
           for TAG in $(git for-each-ref --sort=creatordate --format='%(refname:short)' refs/tags | grep -E '^v[0-9]'); do
             OUT_TAG="${TAG}${TS_SUFFIX}"
             if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then
@@ -97,80 +85,45 @@ jobs:
               continue
             fi
 
-            echo "==> Processing upstream tag ${TAG}"
+            echo "==> Processing ${TAG}"
             git switch --discard-changes --detach "${TAG}"
-
             WORKBR="release/${TAG}-ts"
-            if git rev-parse --verify "${WORKBR}" >/dev/null 2>&1; then
-              git branch -D "${WORKBR}"
-            fi
-            git switch -c "${WORKBR}"
+            git switch -c "${WORKBR}" || git switch "${WORKBR}"
 
             CONFLICT=0
-            if [ "${PATCH_MODE}" = "1" ]; then
+            if [ "$PATCH_MODE" = "1" ]; then
               echo "Applying patches from ${PATCH_GLOB}"
-              # Apply a saved patch series (created with git format-patch)
-              if ! ls ${PATCH_GLOB} >/dev/null 2>&1; then
-                echo "::error::No patch files found at ${PATCH_GLOB}"
-                exit 1
-              fi
-              # -3 enables 3-way merge; --keep-cr is helpful for mixed line endings
-              if ! git am -3 --keep-cr ${PATCH_GLOB}; then
-                CONFLICT=1
-                git am --abort || true
+              if ! git am -3 --keep-cr $PATCH_GLOB; then
+                CONFLICT=1; git am --abort || true
               fi
             else
               echo "Cherry-picking TS commits onto ${TAG}"
               for C in ${COMMITS}; do
                 if ! git cherry-pick -x --allow-empty "${C}"; then
-                  CONFLICT=1
-                  echo "Conflict cherry-picking ${C}"
-                  git cherry-pick --abort || true
-                  break
+                  CONFLICT=1; git cherry-pick --abort || true; break
                 fi
               done
             fi
 
             if [ "${CONFLICT}" = "1" ]; then
-              echo "Conflicts detected for ${TAG}; pushing branch and opening a PR."
+              echo "Conflicts for ${TAG}; pushing branch and opening PR."
               git push origin "${WORKBR}:${WORKBR}"
-
-              # Store conflict info for later PR creation
-              CONFLICT_TAG="${TAG}"
-              CONFLICT_BRANCH="${WORKBR}"
-              continue
+              echo "tag=${TAG}"           >> $GITHUB_OUTPUT
+              echo "branch=${WORKBR}"     >> $GITHUB_OUTPUT
+              echo "status=conflict"      >> $GITHUB_OUTPUT
+              exit 0
             fi
 
-            # Optional: run your build/tests here before tagging
-            # e.g.,
-            # corepack enable
-            # corepack prepare pnpm@9 --activate
-            # pnpm i --frozen-lockfile
-            # pnpm -r build
-            # pnpm -r test
-
-            # Tag + push
             git tag "${OUT_TAG}"
             git push origin "${WORKBR}:${WORKBR}"
             git push origin "refs/tags/${OUT_TAG}"
-
-            echo "Successfully processed: ${OUT_TAG}"
-            SUCCESSFUL_RELEASES="${SUCCESSFUL_RELEASES}${OUT_TAG}:${WORKBR}\n"
+            echo "last_tag=${OUT_TAG}" >> $GITHUB_OUTPUT
+            echo "branch=${WORKBR}"    >> $GITHUB_OUTPUT
+            echo "status=ok"           >> $GITHUB_OUTPUT
             NEW_TAGS=$((NEW_TAGS+1))
           done
 
           echo "new_count=${NEW_TAGS}" >> $GITHUB_OUTPUT
-          echo "successful_releases<<EOF" >> $GITHUB_OUTPUT
-          echo -e "${SUCCESSFUL_RELEASES}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          if [ -n "${CONFLICT_TAG}" ]; then
-            echo "conflict_tag=${CONFLICT_TAG}" >> $GITHUB_OUTPUT
-            echo "conflict_branch=${CONFLICT_BRANCH}" >> $GITHUB_OUTPUT
-            echo "status=conflict" >> $GITHUB_OUTPUT
-          else
-            echo "status=ok" >> $GITHUB_OUTPUT
-          fi
 
       - name: Create PR when conflicts occur
         if: steps.run.outputs.status == 'conflict'

@@ -9,6 +9,9 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  PATCH_MODE: '1' # run in patch mode by default
+
 jobs:
   track:
     runs-on: ubuntu-latest

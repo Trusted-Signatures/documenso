@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
 
           TS_SUFFIX="-ts.1"
-          PATCH_MODE="${PATCH_MODE:-0}"   # set to 1 to use patch files instead of commits
+          PATCH_MODE="${PATCH_MODE:-1}"   # set to 1 to use patch files instead of commits
           PATCH_GLOB="${PATCH_GLOB:-patches/*.patch}"
 
           # Ensure ts/patches exists (your linear change branch)
@@ -68,7 +68,7 @@ jobs:
           SUCCESSFUL_RELEASES=""
           CONFLICT_TAG=""
           CONFLICT_BRANCH=""
-          
+
           for TAG in $(git for-each-ref --sort=creatordate --format='%(refname:short)' refs/tags | grep -E '^v[0-9]'); do
             OUT_TAG="${TAG}${TS_SUFFIX}"
             if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then
@@ -142,7 +142,7 @@ jobs:
           echo "successful_releases<<EOF" >> $GITHUB_OUTPUT
           echo -e "${SUCCESSFUL_RELEASES}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
+
           if [ -n "${CONFLICT_TAG}" ]; then
             echo "conflict_tag=${CONFLICT_TAG}" >> $GITHUB_OUTPUT
             echo "conflict_branch=${CONFLICT_BRANCH}" >> $GITHUB_OUTPUT
@@ -188,11 +188,11 @@ jobs:
           script: |
             const releases = process.env.SUCCESSFUL_RELEASES.trim().split('\n').filter(line => line);
             const { owner, repo } = context.repo;
-            
+
             for (const release of releases) {
               const [tagName, branch] = release.split(':');
               if (!tagName || !branch) continue;
-              
+
               try {
                 // Check if release already exists
                 await github.rest.repos.getReleaseByTag({ owner, repo, tag: tagName });
@@ -210,7 +210,7 @@ jobs:
                 });
                 core.info(`Created release ${tagName}`);
               }
-              
+
               // Trigger publish workflow for this release
               try {
                 await github.rest.actions.createWorkflowDispatch({

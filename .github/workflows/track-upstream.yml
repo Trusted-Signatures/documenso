@@ -48,7 +48,7 @@ jobs:
           }
           echo "PATCH_GLOB=$RUNNER_TEMP/ts_patches/*.patch" >> "$GITHUB_ENV"
 
-      - name: Run tracker (rebase/cherry-pick or patch mode)
+      - name: Run tracker
         id: run
         shell: bash
         env:

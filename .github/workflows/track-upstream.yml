@@ -88,7 +88,7 @@ jobs:
           NEW_TAGS=0
           SUCCESSFUL_RELEASES=""
           # Process upstream tags newest->oldest by create date; adjust the filter if needed
-          for TAG in $(git for-each-ref --sort=creatordate --format='%(refname:short) %(creatordate:iso8601)' refs/tags | grep '^v' | grep -v '-ts[.]1' | tail -n 10 | awk '{print $1}'); do
+          for TAG in $(git for-each-ref --sort=-creatordate --format='%(refname:short) %(creatordate:iso8601)' refs/tags | grep '^v' | grep -v -- '-ts\.' | head -n 10 | awk '{print $1}'); do
             OUT_TAG="${TAG}${TS_SUFFIX}"
 
             if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then

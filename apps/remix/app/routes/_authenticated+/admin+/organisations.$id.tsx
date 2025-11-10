@@ -34,6 +34,7 @@ import { Input } from '@documenso/ui/primitives/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@documenso/ui/primitives/tooltip';
 import { useToast } from '@documenso/ui/primitives/use-toast';
 
+import { AdminOrganisationMemberUpdateDialog } from '~/components/dialogs/admin-organisation-member-update-dialog';
 import { GenericErrorLayout } from '~/components/general/generic-error-layout';
 import { SettingsHeader } from '~/components/general/settings-header';
 
@@ -100,6 +101,27 @@ export default function OrganisationGroupSettingsPage({ params }: Route.Componen
         cell: ({ row }) => (
           <Link to={`/admin/users/${row.original.user.id}`}>{row.original.user.email}</Link>
         ),
+      },
+      {
+        header: t`Actions`,
+        cell: ({ row }) => {
+          const isOwner = row.original.userId === organisation?.ownerUserId;
+
+          return (
+            <div className="flex justify-end space-x-2">
+              <AdminOrganisationMemberUpdateDialog
+                trigger={
+                  <Button variant="outline">
+                    <Trans>Update role</Trans>
+                  </Button>
+                }
+                organisationId={organisationId}
+                organisationMember={row.original}
+                isOwner={isOwner}
+              />
+            </div>
+          );
+        },
       },
     ] satisfies DataTableColumnDef<TGetAdminOrganisationResponse['members'][number]>[];
   }, [organisation]);
@@ -367,6 +389,7 @@ const OrganisationAdminForm = ({ organisation }: OrganisationAdminFormOptions) =
       claims: {
         teamCount: organisation.organisationClaim.teamCount,
         memberCount: organisation.organisationClaim.memberCount,
+        envelopeItemCount: organisation.organisationClaim.envelopeItemCount,
         flags: organisation.organisationClaim.flags,
       },
       originalSubscriptionClaimId: organisation.organisationClaim.originalSubscriptionClaimId || '',
@@ -518,6 +541,30 @@ const OrganisationAdminForm = ({ organisation }: OrganisationAdminFormOptions) =
               </FormControl>
               <FormDescription>
                 <Trans>Number of members allowed. 0 = Unlimited</Trans>
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="claims.envelopeItemCount"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>
+                <Trans>Envelope Item Count</Trans>
+              </FormLabel>
+              <FormControl>
+                <Input
+                  type="number"
+                  min={1}
+                  {...field}
+                  onChange={(e) => field.onChange(parseInt(e.target.value, 10) || 0)}
+                />
+              </FormControl>
+              <FormDescription>
+                <Trans>Maximum number of uploaded files per envelope allowed</Trans>
               </FormDescription>
               <FormMessage />
             </FormItem>

@@ -6,11 +6,16 @@ export const SALT_ROUNDS = 12;
 export const IDENTITY_PROVIDER_NAME: Record<string, string> = {
   DOCUMENSO: 'Documenso',
   GOOGLE: 'Google',
+  MICROSOFT: 'Microsoft',
   OIDC: 'OIDC',
 };
 
 export const IS_GOOGLE_SSO_ENABLED = Boolean(
   env('NEXT_PRIVATE_GOOGLE_CLIENT_ID') && env('NEXT_PRIVATE_GOOGLE_CLIENT_SECRET'),
+);
+
+export const IS_MICROSOFT_SSO_ENABLED = Boolean(
+  env('NEXT_PRIVATE_MICROSOFT_CLIENT_ID') && env('NEXT_PRIVATE_MICROSOFT_CLIENT_SECRET'),
 );
 
 export const IS_OIDC_SSO_ENABLED = Boolean(
@@ -23,6 +28,9 @@ export const OIDC_PROVIDER_LABEL = env('NEXT_PRIVATE_OIDC_PROVIDER_LABEL');
 
 export const USER_SECURITY_AUDIT_LOG_MAP: Record<string, string> = {
   ACCOUNT_SSO_LINK: 'Linked account to SSO',
+  ACCOUNT_SSO_UNLINK: 'Unlinked account from SSO',
+  ORGANISATION_SSO_LINK: 'Linked account to organisation',
+  ORGANISATION_SSO_UNLINK: 'Unlinked account from organisation',
   ACCOUNT_PROFILE_UPDATE: 'Profile updated',
   AUTH_2FA_DISABLE: '2FA Disabled',
   AUTH_2FA_ENABLE: '2FA Enabled',

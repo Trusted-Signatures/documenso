@@ -4,14 +4,15 @@ import { msg } from '@lingui/core/macro';
 import { useLingui } from '@lingui/react';
 import { Trans } from '@lingui/react/macro';
 import { Loader } from 'lucide-react';
-import { useDropzone } from 'react-dropzone';
+import { ErrorCode, type FileRejection, useDropzone } from 'react-dropzone';
 import { useNavigate, useParams } from 'react-router';
+import { match } from 'ts-pattern';
 
 import { APP_DOCUMENT_UPLOAD_SIZE_LIMIT } from '@documenso/lib/constants/app';
 import { megabytesToBytes } from '@documenso/lib/universal/unit-convertions';
-import { putPdfFile } from '@documenso/lib/universal/upload/put-file';
 import { formatTemplatesPath } from '@documenso/lib/utils/teams';
 import { trpc } from '@documenso/trpc/react';
+import type { TCreateTemplatePayloadSchema } from '@documenso/trpc/server/template-router/schema';
 import { cn } from '@documenso/ui/lib/utils';
 import { useToast } from '@documenso/ui/primitives/use-toast';
 
@@ -39,13 +40,17 @@ export const TemplateDropZoneWrapper = ({ children, className }: TemplateDropZon
     try {
       setIsLoading(true);
 
-      const documentData = await putPdfFile(file);
-
-      const { id } = await createTemplate({
+      const payload = {
         title: file.name,
-        templateDocumentDataId: documentData.id,
         folderId: folderId ?? undefined,
-      });
+      } satisfies TCreateTemplatePayloadSchema;
+
+      const formData = new FormData();
+
+      formData.append('payload', JSON.stringify(payload));
+      formData.append('file', file);
+
+      const { envelopeId: id } = await createTemplate(formData);
 
       toast({
         title: _(msg`Template uploaded`),
@@ -67,10 +72,47 @@ export const TemplateDropZoneWrapper = ({ children, className }: TemplateDropZon
     }
   };
 
-  const onFileDropRejected = () => {
+  const onFileDropRejected = (fileRejections: FileRejection[]) => {
+    if (!fileRejections.length) {
+      return;
+    }
+
+    // Since users can only upload only one file (no multi-upload), we only handle the first file rejection
+    const { file, errors } = fileRejections[0];
+
+    if (!errors.length) {
+      return;
+    }
+
+    const errorNodes = errors.map((error, index) => (
+      <span key={index} className="block">
+        {match(error.code)
+          .with(ErrorCode.FileTooLarge, () => (
+            <Trans>File is larger than {APP_DOCUMENT_UPLOAD_SIZE_LIMIT}MB</Trans>
+          ))
+          .with(ErrorCode.FileInvalidType, () => <Trans>Only PDF files are allowed</Trans>)
+          .with(ErrorCode.FileTooSmall, () => <Trans>File is too small</Trans>)
+          .with(ErrorCode.TooManyFiles, () => (
+            <Trans>Only one file can be uploaded at a time</Trans>
+          ))
+          .otherwise(() => (
+            <Trans>Unknown error</Trans>
+          ))}
+      </span>
+    ));
+
+    const description = (
+      <>
+        <span className="font-medium">
+          {file.name} <Trans>couldn't be uploaded:</Trans>
+        </span>
+        {errorNodes}
+      </>
+    );
+
     toast({
-      title: _(msg`Your template failed to upload.`),
-      description: _(msg`File cannot be larger than ${APP_DOCUMENT_UPLOAD_SIZE_LIMIT}MB`),
+      title: _(msg`Upload failed`),
+      description,
       duration: 5000,
       variant: 'destructive',
     });
@@ -88,8 +130,8 @@ export const TemplateDropZoneWrapper = ({ children, className }: TemplateDropZon
         void onFileDrop(acceptedFile);
       }
     },
-    onDropRejected: () => {
-      void onFileDropRejected();
+    onDropRejected: (fileRejections) => {
+      onFileDropRejected(fileRejections);
     },
     noClick: true,
     noDragEventsBubbling: true,

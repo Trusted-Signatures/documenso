@@ -25,14 +25,25 @@ Command.displayName = CommandPrimitive.displayName;
 
 type CommandDialogProps = DialogProps & {
   commandProps?: React.ComponentPropsWithoutRef<typeof CommandPrimitive>;
+  position?: 'start' | 'end' | 'center';
+  dialogContentClassName?: string;
 };
 
-const CommandDialog = ({ children, commandProps, ...props }: CommandDialogProps) => {
+const CommandDialog = ({
+  children,
+  commandProps,
+  position = 'center',
+  dialogContentClassName,
+  ...props
+}: CommandDialogProps) => {
   return (
     <Dialog {...props}>
       <DialogContent
-        className="w-11/12 items-center overflow-hidden rounded-lg p-0 shadow-2xl lg:mt-0"
-        position="center"
+        className={cn(
+          'w-11/12 items-center overflow-hidden rounded-lg p-0 shadow-2xl lg:mt-0',
+          dialogContentClassName,
+        )}
+        position={position}
         overlayClassName="bg-background/60"
       >
         <Command
@@ -64,6 +75,27 @@ const CommandInput = React.forwardRef<
 ));
 
 CommandInput.displayName = CommandPrimitive.Input.displayName;
+
+const CommandTextInput = React.forwardRef<
+  React.ElementRef<typeof CommandPrimitive.Input>,
+  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
+>(({ className, ...props }, ref) => (
+  <div cmdk-input-wrapper="">
+    <CommandPrimitive.Input
+      ref={ref}
+      className={cn(
+        'bg-background border-input ring-offset-background placeholder:text-muted-foreground/40 focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50',
+        className,
+        {
+          'ring-2 !ring-red-500 transition-all': props['aria-invalid'],
+        },
+      )}
+      {...props}
+    />
+  </div>
+));
+
+CommandTextInput.displayName = CommandPrimitive.Input.displayName;
 
 const CommandList = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive.List>,
@@ -147,6 +179,7 @@ export {
   Command,
   CommandDialog,
   CommandInput,
+  CommandTextInput,
   CommandList,
   CommandEmpty,
   CommandGroup,

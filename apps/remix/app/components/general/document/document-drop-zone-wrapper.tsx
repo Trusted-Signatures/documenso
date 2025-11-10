@@ -4,7 +4,7 @@ import { msg } from '@lingui/core/macro';
 import { useLingui } from '@lingui/react';
 import { Trans } from '@lingui/react/macro';
 import { Loader } from 'lucide-react';
-import { useDropzone } from 'react-dropzone';
+import { ErrorCode, type FileRejection, useDropzone } from 'react-dropzone';
 import { Link, useNavigate, useParams } from 'react-router';
 import { match } from 'ts-pattern';
 
@@ -16,9 +16,9 @@ import { APP_DOCUMENT_UPLOAD_SIZE_LIMIT, IS_BILLING_ENABLED } from '@documenso/l
 import { DEFAULT_DOCUMENT_TIME_ZONE, TIME_ZONES } from '@documenso/lib/constants/time-zones';
 import { AppError, AppErrorCode } from '@documenso/lib/errors/app-error';
 import { megabytesToBytes } from '@documenso/lib/universal/unit-convertions';
-import { putPdfFile } from '@documenso/lib/universal/upload/put-file';
 import { formatDocumentsPath } from '@documenso/lib/utils/teams';
 import { trpc } from '@documenso/trpc/react';
+import type { TCreateDocumentPayloadSchema } from '@documenso/trpc/server/document-router/create-document.types';
 import { cn } from '@documenso/ui/lib/utils';
 import { useToast } from '@documenso/ui/primitives/use-toast';
 
@@ -62,14 +62,18 @@ export const DocumentDropZoneWrapper = ({ children, className }: DocumentDropZon
     try {
       setIsLoading(true);
 
-      const response = await putPdfFile(file);
-
-      const { id } = await createDocument({
+      const payload = {
         title: file.name,
-        documentDataId: response.id,
-        timezone: userTimezone, // Note: When migrating to v2 document upload remember to pass this through as a 'userTimezone' field.
+        timezone: userTimezone,
         folderId: folderId ?? undefined,
-      });
+      } satisfies TCreateDocumentPayloadSchema;
+
+      const formData = new FormData();
+
+      formData.append('payload', JSON.stringify(payload));
+      formData.append('file', file);
+
+      const { envelopeId: id } = await createDocument(formData);
 
       void refreshLimits();
 
@@ -95,6 +99,10 @@ export const DocumentDropZoneWrapper = ({ children, className }: DocumentDropZon
           AppErrorCode.LIMIT_EXCEEDED,
           () => msg`You have reached your document limit for this month. Please upgrade your plan.`,
         )
+        .with(
+          'ENVELOPE_ITEM_LIMIT_EXCEEDED',
+          () => msg`You have reached the limit of the number of files per envelope`,
+        )
         .otherwise(() => msg`An error occurred while uploading your document.`);
 
       toast({
@@ -108,15 +116,51 @@ export const DocumentDropZoneWrapper = ({ children, className }: DocumentDropZon
     }
   };
 
-  const onFileDropRejected = () => {
+  const onFileDropRejected = (fileRejections: FileRejection[]) => {
+    if (!fileRejections.length) {
+      return;
+    }
+
+    // Since users can only upload only one file (no multi-upload), we only handle the first file rejection
+    const { file, errors } = fileRejections[0];
+
+    if (!errors.length) {
+      return;
+    }
+
+    const errorNodes = errors.map((error, index) => (
+      <span key={index} className="block">
+        {match(error.code)
+          .with(ErrorCode.FileTooLarge, () => (
+            <Trans>File is larger than {APP_DOCUMENT_UPLOAD_SIZE_LIMIT}MB</Trans>
+          ))
+          .with(ErrorCode.FileInvalidType, () => <Trans>Only PDF files are allowed</Trans>)
+          .with(ErrorCode.FileTooSmall, () => <Trans>File is too small</Trans>)
+          .with(ErrorCode.TooManyFiles, () => (
+            <Trans>Only one file can be uploaded at a time</Trans>
+          ))
+          .otherwise(() => (
+            <Trans>Unknown error</Trans>
+          ))}
+      </span>
+    ));
+
+    const description = (
+      <>
+        <span className="font-medium">
+          {file.name} <Trans>couldn't be uploaded:</Trans>
+        </span>
+        {errorNodes}
+      </>
+    );
+
     toast({
-      title: _(msg`Your document failed to upload.`),
-      description: _(msg`File cannot be larger than ${APP_DOCUMENT_UPLOAD_SIZE_LIMIT}MB`),
+      title: _(msg`Upload failed`),
+      description,
       duration: 5000,
       variant: 'destructive',
     });
   };
-
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: {
       'application/pdf': ['.pdf'],
@@ -129,8 +173,8 @@ export const DocumentDropZoneWrapper = ({ children, className }: DocumentDropZon
         void onFileDrop(acceptedFile);
       }
     },
-    onDropRejected: () => {
-      void onFileDropRejected();
+    onDropRejected: (fileRejections) => {
+      onFileDropRejected(fileRejections);
     },
     noClick: true,
     noDragEventsBubbling: true,

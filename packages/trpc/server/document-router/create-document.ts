@@ -1,19 +1,30 @@
+import { EnvelopeType } from '@prisma/client';
+
 import { getServerLimits } from '@documenso/ee/server-only/limits/server';
 import { AppError, AppErrorCode } from '@documenso/lib/errors/app-error';
-import { createDocument } from '@documenso/lib/server-only/document/create-document';
+import { createEnvelope } from '@documenso/lib/server-only/envelope/create-envelope';
+import { putNormalizedPdfFileServerSide } from '@documenso/lib/universal/upload/put-file.server';
+import { mapSecondaryIdToDocumentId } from '@documenso/lib/utils/envelope';
 
 import { authenticatedProcedure } from '../trpc';
 import {
   ZCreateDocumentRequestSchema,
   ZCreateDocumentResponseSchema,
+  createDocumentMeta,
 } from './create-document.types';
 
 export const createDocumentRoute = authenticatedProcedure
+  .meta(createDocumentMeta)
   .input(ZCreateDocumentRequestSchema)
   .output(ZCreateDocumentResponseSchema)
   .mutation(async ({ input, ctx }) => {
     const { user, teamId } = ctx;
-    const { title, documentDataId, timezone, folderId } = input;
+
+    const { payload, file } = input;
+
+    const { title, timezone, folderId, attachments } = payload;
+
+    const { id: documentDataId } = await putNormalizedPdfFileServerSide(file);
 
     ctx.logger.info({
       input: {
@@ -30,18 +41,29 @@ export const createDocumentRoute = authenticatedProcedure
       });
     }
 
-    const document = await createDocument({
+    const document = await createEnvelope({
       userId: user.id,
       teamId,
-      title,
-      documentDataId,
+      internalVersion: 1,
+      data: {
+        type: EnvelopeType.DOCUMENT,
+        title,
+        userTimezone: timezone,
+        folderId,
+        envelopeItems: [
+          {
+            // If you ever allow more than 1 in this endpoint, make sure to use `maximumEnvelopeItemCount` to limit it.
+            documentDataId,
+          },
+        ],
+      },
+      attachments,
       normalizePdf: true,
-      userTimezone: timezone,
       requestMetadata: ctx.metadata,
-      folderId,
     });
 
     return {
-      id: document.id,
+      envelopeId: document.id,
+      id: mapSecondaryIdToDocumentId(document.secondaryId),
     };
   });

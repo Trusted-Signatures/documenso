@@ -213,15 +213,18 @@ jobs:
                 core.info(`Created release ${tagName}`);
               }
 
-              // Trigger publish workflow for this release
+              // Trigger build workflow for this release
               try {
                 await github.rest.actions.createWorkflowDispatch({
                   owner, repo,
-                  workflow_id: 'publish.yml',
-                  ref: branch
+                  workflow_id: 'build-tag.yml',
+                  ref: 'main',
+                  inputs: {
+                    tag_name: tagName
+                  }
                 });
-                core.info(`Triggered publish workflow for ${tagName}`);
+                core.info(`Triggered build workflow for ${tagName}`);
               } catch (e) {
-                core.error(`Failed to trigger publish workflow for ${tagName}: ${e.message}`);
+                core.error(`Failed to trigger build workflow for ${tagName}: ${e.message}`);
               }
             }

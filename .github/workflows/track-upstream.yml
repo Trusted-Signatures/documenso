@@ -24,6 +24,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || github.token }}
 
       - name: Set up git identity
         run: |

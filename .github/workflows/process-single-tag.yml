@@ -56,14 +56,19 @@ jobs:
           git switch --discard-changes --detach "${TAG}"
           git switch -c "${WORKBR}"
 
-          # Apply patch
-          if git apply --check patches/add-trusted-signatures-signing-support.patch 2>/dev/null; then
-            git apply patches/add-trusted-signatures-signing-support.patch
+          # Apply patch - try git am first, then git apply
+          PATCH="patches/add-trusted-signatures-signing-support.patch"
+          if git am -3 --keep-cr "$PATCH" 2>/dev/null; then
+            echo "Applied patch via git am"
+          elif git apply --check "$PATCH" 2>/dev/null; then
+            git apply "$PATCH"
             git add -A
             git commit -m "Add Trusted Signatures support"
-            echo "Applied patch successfully"
+            echo "Applied patch via git apply"
           else
-            echo "::error::Patch failed to apply"
+            echo "::error::Patch failed to apply to ${TAG}"
+            echo "::error::This tag may have conflicts that need manual resolution"
+            git apply "$PATCH" 2>&1 || true
             exit 1
           fi
 

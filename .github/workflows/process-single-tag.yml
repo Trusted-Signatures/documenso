@@ -1,0 +1,117 @@
+name: Process Single Upstream Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to process (e.g., v2.0.5)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+
+      - name: Set up git identity
+        run: |
+          git config user.name  "actions-bot"
+          git config user.email "actions-bot@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch tags
+        run: |
+          git remote add upstream https://github.com/documenso/documenso.git || true
+          git fetch upstream --tags --prune
+
+      - name: Process tag
+        id: process
+        env:
+          TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          
+          TS_SUFFIX="-ts.1"
+          OUT_TAG="${TAG}${TS_SUFFIX}"
+          WORKBR="release/${TAG}-ts"
+
+          if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then
+            echo "::error::Tag ${OUT_TAG} already exists"
+            exit 1
+          fi
+
+          echo "==> Processing ${TAG}"
+          git switch --discard-changes --detach "${TAG}"
+          git switch -c "${WORKBR}"
+
+          # Apply patch
+          if git apply --check patches/add-trusted-signatures-signing-support.patch 2>/dev/null; then
+            git apply patches/add-trusted-signatures-signing-support.patch
+            git add -A
+            git commit -m "Add Trusted Signatures support"
+            echo "Applied patch successfully"
+          else
+            echo "::error::Patch failed to apply"
+            exit 1
+          fi
+
+          # Tag and push
+          git tag "${OUT_TAG}"
+          git push origin "${WORKBR}:${WORKBR}"
+          git push origin "refs/tags/${OUT_TAG}"
+
+          echo "tag=${OUT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "branch=${WORKBR}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        env:
+          TAG_NAME: ${{ steps.process.outputs.tag }}
+          BRANCH: ${{ steps.process.outputs.branch }}
+        with:
+          script: |
+            const tagName = process.env.TAG_NAME;
+            const branch = process.env.BRANCH;
+            const { owner, repo } = context.repo;
+
+            await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tagName,
+              target_commitish: branch,
+              name: tagName,
+              body: `Automated Trusted Signatures release based on upstream ${tagName.replace(/-ts.*$/, '')}`,
+              draft: false,
+              prerelease: false
+            });
+            core.info(`Created release ${tagName}`);
+
+      - name: Trigger build workflow
+        uses: actions/github-script@v7
+        env:
+          TAG_NAME: ${{ steps.process.outputs.tag }}
+        with:
+          script: |
+            const tagName = process.env.TAG_NAME;
+            const { owner, repo } = context.repo;
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo,
+              workflow_id: 'build-tag.yml',
+              ref: 'main',
+              inputs: {
+                tag_name: tagName
+              }
+            });
+            core.info(`Triggered build workflow for ${tagName}`);

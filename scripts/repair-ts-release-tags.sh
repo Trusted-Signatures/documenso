@@ -9,6 +9,7 @@ DRY_RUN=0
 PUSH=0
 FETCH=1
 ALLOW_DIRTY=0
+MIN_BASE_VERSION="2.0.0"
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,7 @@ Options:
   --dry-run           Show what would change without modifying refs
   --no-fetch          Skip fetch of remote branches/tags
   --allow-dirty       Allow running with local working-tree changes
+  --min-base-version  Minimum base tag version to process (default: 2.0.0)
   --help              Show this help
 
 Examples:
@@ -84,6 +86,32 @@ patch_present_on_head() {
   git apply --reverse --check "$patch" >/dev/null 2>&1
 }
 
+should_process_base_tag() {
+  local base_tag="$1"
+  local min_version="$2"
+  local base="${base_tag#v}"
+  local base_core="${base%%-*}"
+  local min_core="${min_version#v}"
+  local IFS=.
+  local base_parts min_parts
+  read -r -a base_parts <<< "$base_core"
+  read -r -a min_parts <<< "$min_core"
+
+  local b_major="${base_parts[0]:-0}"
+  local b_minor="${base_parts[1]:-0}"
+  local b_patch="${base_parts[2]:-0}"
+  local m_major="${min_parts[0]:-0}"
+  local m_minor="${min_parts[1]:-0}"
+  local m_patch="${min_parts[2]:-0}"
+
+  if [ "$b_major" -gt "$m_major" ]; then return 0; fi
+  if [ "$b_major" -lt "$m_major" ]; then return 1; fi
+  if [ "$b_minor" -gt "$m_minor" ]; then return 0; fi
+  if [ "$b_minor" -lt "$m_minor" ]; then return 1; fi
+  if [ "$b_patch" -ge "$m_patch" ]; then return 0; fi
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --patch)
@@ -116,6 +144,11 @@ while [ "$#" -gt 0 ]; do
     --allow-dirty)
       ALLOW_DIRTY=1
       shift
+      ;;
+    --min-base-version)
+      [ "$#" -ge 2 ] || die "--min-base-version requires a value"
+      MIN_BASE_VERSION="$2"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -163,6 +196,12 @@ for ts_tag in "${TS_TAGS[@]}"; do
   base_tag="${ts_tag%"$SUFFIX"}"
   if [ -z "$base_tag" ] || [ "$base_tag" = "$ts_tag" ]; then
     log "Skipping malformed tag: $ts_tag"
+    skipped_count=$((skipped_count + 1))
+    continue
+  fi
+
+  if ! should_process_base_tag "$base_tag" "$MIN_BASE_VERSION"; then
+    log "Skipping ${ts_tag}: base tag ${base_tag} is lower than ${MIN_BASE_VERSION}."
     skipped_count=$((skipped_count + 1))
     continue
   fi

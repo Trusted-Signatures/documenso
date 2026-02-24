@@ -89,44 +89,71 @@ jobs:
 
           NEW_TAGS=0
           SUCCESSFUL_RELEASES=""
-          # Process upstream tags newest->oldest by create date; adjust the filter if needed
-          for TAG in $(git for-each-ref --sort=-creatordate --format='%(refname:short) %(creatordate:iso8601)' refs/tags | grep '^v' | grep -v -- '-ts\.' | head -n 10 | awk '{print $1}'); do
+
+          # Build the candidate list from upstream tags only.
+          mapfile -t CANDIDATE_TAGS < <(
+            git ls-remote --tags --refs upstream 'v*' \
+              | awk '{print $2}' \
+              | sed 's#refs/tags/##' \
+              | awk '!/-ts\./' \
+              | sort -Vr \
+              | head -n 10
+          )
+
+          if [ ${#CANDIDATE_TAGS[@]} -eq 0 ]; then
+            echo "No upstream release tags found to process."
+          fi
+
+          for TAG in "${CANDIDATE_TAGS[@]}"; do
             OUT_TAG="${TAG}${TS_SUFFIX}"
+            UPSTREAM_SHA="$(git ls-remote --tags --refs upstream "refs/tags/${TAG}" | awk '{print $1}')"
+            if [ -z "${UPSTREAM_SHA}" ]; then
+              echo "Could not resolve upstream SHA for ${TAG}, skipping."
+              continue
+            fi
 
             if git rev-parse -q --verify "refs/tags/${OUT_TAG}" >/dev/null; then
               echo "Already processed: ${OUT_TAG}"
               continue
             fi
 
-            echo "==> Processing ${TAG}"
-            git switch --discard-changes --detach "${TAG}"
+            echo "==> Processing ${TAG} (${UPSTREAM_SHA})"
+            git switch --discard-changes --detach "${UPSTREAM_SHA}"
 
             WORKBR="release/${TAG}-ts"
             if git rev-parse -q --verify "${WORKBR}" >/dev/null; then
               git switch "${WORKBR}"
-              git reset --hard "${TAG}"
+              git reset --hard "${UPSTREAM_SHA}"
             else
               git switch -c "${WORKBR}"
             fi
 
-            # Apply the patch series; abort+push branch on conflict
+            # Apply patch series:
+            # - mbox patches -> git am -3
+            # - unified diff patches -> git apply --3way --index + manual commit
             CONFLICT=0
             for PATCH in "${PATCHES[@]}"; do
-              if git am -3 --keep-cr "$PATCH" 2>/dev/null; then
-                echo "Applied patch: $PATCH"
-              elif git apply --check "$PATCH" 2>/dev/null; then
-                # Fallback to git apply + manual commit for non-am format patches
-                git apply "$PATCH"
-                git add -A
-                git commit -m "Add Trusted Signatures support
-
-                Applied from patch: $(basename "$PATCH")"
-                echo "Applied patch (via apply): $PATCH"
+              if head -n 1 "$PATCH" | grep -qE '^From [0-9a-f]{40} '; then
+                if git am -3 --keep-cr "$PATCH" 2>/dev/null; then
+                  echo "Applied patch (git am): $PATCH"
+                  continue
+                fi
               else
-                echo "Patch conflict on ${TAG} with $PATCH"
-                CONFLICT=1
-                break
+                if git apply --3way --index "$PATCH" 2>/dev/null; then
+                  git commit -m "Add Trusted Signatures support
+
+                  Applied from patch: $(basename "$PATCH")"
+                  echo "Applied patch (git apply --3way): $PATCH"
+                  continue
+                fi
               fi
+
+              echo "Patch conflict on ${TAG} with $PATCH"
+              echo "Patch diagnostics:"
+              git apply --check --verbose "$PATCH" || true
+              git status --short || true
+              CONFLICT=1
+              break
             done
 
             if [ "$CONFLICT" = "1" ]; then

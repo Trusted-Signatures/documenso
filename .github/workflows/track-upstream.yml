@@ -104,6 +104,24 @@ jobs:
             echo "No upstream release tags found to process."
           fi
 
+          has_ts_markers() {
+            local markers=0
+
+            if [ -f "packages/signing/transports/trusted-signatures.ts" ]; then
+              markers=$((markers + 1))
+            fi
+
+            if [ -f "packages/signing/index.ts" ] && grep -q "trusted-signatures" "packages/signing/index.ts"; then
+              markers=$((markers + 1))
+            fi
+
+            if [ -f ".env.example" ] && grep -q "NEXT_PRIVATE_SIGNING_TS_API_KEY" ".env.example"; then
+              markers=$((markers + 1))
+            fi
+
+            [ "$markers" -ge 2 ]
+          }
+
           for TAG in "${CANDIDATE_TAGS[@]}"; do
             OUT_TAG="${TAG}${TS_SUFFIX}"
             UPSTREAM_SHA="$(git ls-remote --tags --refs upstream "refs/tags/${TAG}" | awk '{print $1}')"
@@ -128,41 +146,54 @@ jobs:
               git switch -c "${WORKBR}"
             fi
 
-            # Apply patch series:
-            # - mbox patches -> git am -3
-            # - unified diff patches -> git apply --3way --index + manual commit
-            CONFLICT=0
-            for PATCH in "${PATCHES[@]}"; do
-              if head -n 1 "$PATCH" | grep -qE '^From [0-9a-f]{40} '; then
-                if git am -3 --keep-cr "$PATCH" 2>/dev/null; then
-                  echo "Applied patch (git am): $PATCH"
-                  continue
-                fi
-              else
-                if git apply --3way --index "$PATCH" 2>/dev/null; then
-                  git commit -m "Add Trusted Signatures support
+            if has_ts_markers; then
+              echo "Trusted Signatures markers already present on ${TAG}; skipping patch apply."
+            else
 
-                  Applied from patch: $(basename "$PATCH")"
-                  echo "Applied patch (git apply --3way): $PATCH"
-                  continue
+              # Apply patch series:
+              # - mbox patches -> git am -3
+              # - unified diff patches -> git apply --3way --index + manual commit
+              CONFLICT=0
+              for PATCH in "${PATCHES[@]}"; do
+                if head -n 1 "$PATCH" | grep -qE '^From [0-9a-f]{40} '; then
+                  if git am -3 --keep-cr "$PATCH" 2>/dev/null; then
+                    echo "Applied patch (git am): $PATCH"
+                    continue
+                  fi
+                else
+                  if git apply --3way --index "$PATCH" 2>/dev/null; then
+                    git commit -m "Add Trusted Signatures support
+
+                    Applied from patch: $(basename "$PATCH")"
+                    echo "Applied patch (git apply --3way): $PATCH"
+                    continue
+                  fi
                 fi
+
+                if has_ts_markers; then
+                  echo "Trusted Signatures markers detected after apply attempt on ${TAG}; continuing."
+                  CONFLICT=0
+                  break
+                fi
+
+                echo "Patch conflict on ${TAG} with $PATCH"
+                echo "Patch diagnostics:"
+                git apply --check --verbose "$PATCH" || true
+                git status --short || true
+                CONFLICT=1
+                break
+              done
+
+              if [ "$CONFLICT" = "1" ]; then
+                git am --abort 2>/dev/null || true
+                git reset --hard "${UPSTREAM_SHA}" || true
+                git clean -fd || true
+                git push origin "${WORKBR}:${WORKBR}"
+                echo "tag=${TAG}"        >> "$GITHUB_OUTPUT"
+                echo "branch=${WORKBR}"  >> "$GITHUB_OUTPUT"
+                echo "status=conflict"   >> "$GITHUB_OUTPUT"
+                exit 0
               fi
-
-              echo "Patch conflict on ${TAG} with $PATCH"
-              echo "Patch diagnostics:"
-              git apply --check --verbose "$PATCH" || true
-              git status --short || true
-              CONFLICT=1
-              break
-            done
-
-            if [ "$CONFLICT" = "1" ]; then
-              git am --abort 2>/dev/null || true
-              git push origin "${WORKBR}:${WORKBR}"
-              echo "tag=${TAG}"        >> "$GITHUB_OUTPUT"
-              echo "branch=${WORKBR}"  >> "$GITHUB_OUTPUT"
-              echo "status=conflict"   >> "$GITHUB_OUTPUT"
-              exit 0
             fi
 
             # Tag + push

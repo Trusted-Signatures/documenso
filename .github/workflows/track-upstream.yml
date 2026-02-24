@@ -90,12 +90,38 @@ jobs:
           NEW_TAGS=0
           SUCCESSFUL_RELEASES=""
 
-          # Build the candidate list from upstream tags only.
+          # Build the candidate list from upstream releases (not just tags).
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not found, attempting install..."
+            sudo apt-get update && sudo apt-get install -y jq || true
+          fi
+
+          RELEASES_API_URL="https://api.github.com/repos/documenso/documenso/releases?per_page=100"
+          RELEASES_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "${RELEASES_API_URL}")"
+
+          mapfile -t RELEASED_UPSTREAM_TAGS < <(
+            if command -v jq >/dev/null 2>&1; then
+              printf '%s' "${RELEASES_JSON}" \
+                | jq -r '.[] | select(.draft == false) | .tag_name' \
+                | awk 'NF'
+            else
+              printf '%s' "${RELEASES_JSON}" \
+                | node -e "const fs=require('fs');const releases=JSON.parse(fs.readFileSync(0,'utf8'));for(const r of releases){if(!r.draft&&typeof r.tag_name==='string'&&r.tag_name.length>0)console.log(r.tag_name);}"
+            fi
+          )
+
+          if [ ${#RELEASED_UPSTREAM_TAGS[@]} -eq 0 ]; then
+            echo "No released upstream tags found to process."
+          fi
+
           mapfile -t CANDIDATE_TAGS < <(
-            git ls-remote --tags --refs upstream 'v*' \
-              | awk '{print $2}' \
-              | sed 's#refs/tags/##' \
-              | awk '!/-ts\./' \
+            printf '%s\n' "${RELEASED_UPSTREAM_TAGS[@]}" \
+              | awk '/^v/ && !/-ts\./' \
+              | while read -r RELEASE_TAG; do
+                  if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+                    echo "${RELEASE_TAG}"
+                  fi
+                done \
               | sort -Vr \
               | head -n 10
           )

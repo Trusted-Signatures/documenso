@@ -73,10 +73,26 @@ jobs:
             exit 0
           fi
 
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not found, attempting install..."
+            sudo apt-get update && sudo apt-get install -y jq || true
+          fi
+
+          RELEASES_API_URL="https://api.github.com/repos/${{ github.repository }}/releases?per_page=100"
+          RELEASES_JSON="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            "${RELEASES_API_URL}")"
+
           mapfile -t STABLE_TS_TAGS < <(
-            git tag -l 'v*-ts.*' \
-              | grep -Ev 'rc|beta|alpha' \
-              | sort -V
+            if command -v jq >/dev/null 2>&1; then
+              printf '%s' "${RELEASES_JSON}" \
+                | jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+                | awk '/^v.*-ts\./' \
+                | sort -V
+            else
+              printf '%s' "${RELEASES_JSON}" \
+                | node -e "const fs=require('fs');const releases=JSON.parse(fs.readFileSync(0,'utf8'));const tags=releases.map(r=>({t:r.tag_name,d:r.draft,p:r.prerelease})).filter(x=>!x.d&&!x.p&&typeof x.t==='string'&&/^v.*-ts\\./.test(x.t)).map(x=>x.t);tags.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));for(const t of tags)console.log(t);"
+            fi
           )
 
           if [ ${#STABLE_TS_TAGS[@]} -eq 0 ]; then

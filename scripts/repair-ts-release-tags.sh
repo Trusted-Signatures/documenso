@@ -56,15 +56,27 @@ run_cmd() {
 apply_patch_commit() {
   local patch="$1"
 
+  if [ ! -f "$patch" ]; then
+    return 1
+  fi
+
   if head -n 1 "$patch" | grep -qE '^From [0-9a-f]{40} '; then
-    git am -3 --keep-cr "$patch"
+    if git am -3 --keep-cr "$patch"; then
+      return 0
+    fi
+
+    git am --abort >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if git apply --3way --index "$patch"; then
+    git commit --no-verify -m "Add Trusted Signatures support
+
+Applied from patch: $(basename "$patch")"
     return 0
   fi
 
-  git apply --3way --index "$patch"
-  git commit -m "Add Trusted Signatures support
-
-Applied from patch: $(basename "$patch")"
+  return 1
 }
 
 patch_present_on_head() {
@@ -116,6 +128,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "Must run inside a git repository"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+if [[ "$PATCH_FILE" != /* ]]; then
+  PATCH_FILE="${REPO_ROOT}/${PATCH_FILE}"
+fi
 [ -f "$PATCH_FILE" ] || die "Patch file not found: $PATCH_FILE"
 
 if [ "$ALLOW_DIRTY" -ne 1 ] && [ -n "$(git status --porcelain)" ]; then

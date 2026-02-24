@@ -59,15 +59,55 @@ jobs:
             fi
           done
 
+      - name: Determine tag channel
+        id: tag_channel
+        env:
+          TAG_NAME: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if echo "$TAG_NAME" | grep -Eq 'rc|beta|alpha'; then
+            echo "is_stable=false" >> "$GITHUB_OUTPUT"
+            echo "is_latest_stable=false" >> "$GITHUB_OUTPUT"
+            echo "is_rc=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t STABLE_TS_TAGS < <(
+            git tag -l 'v*-ts.*' \
+              | grep -Ev 'rc|beta|alpha' \
+              | sort -V
+          )
+
+          if [ ${#STABLE_TS_TAGS[@]} -eq 0 ]; then
+            echo "No stable TS tags found; skipping latest alias update."
+            echo "is_stable=true" >> "$GITHUB_OUTPUT"
+            echo "is_latest_stable=false" >> "$GITHUB_OUTPUT"
+            echo "is_rc=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LATEST_STABLE_TAG="$(printf '%s\n' "${STABLE_TS_TAGS[@]}" | tail -n 1)"
+          echo "latest_stable_tag=${LATEST_STABLE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "is_stable=true" >> "$GITHUB_OUTPUT"
+          echo "is_rc=false" >> "$GITHUB_OUTPUT"
+
+          if [ "$TAG_NAME" = "$LATEST_STABLE_TAG" ]; then
+            echo "is_latest_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest_stable=false" >> "$GITHUB_OUTPUT"
+            echo "Current tag ${TAG_NAME} is not latest stable tag ${LATEST_STABLE_TAG}; skipping latest alias."
+          fi
+
       - name: Tag latest for stable releases
-        if: ${{ !contains(inputs.tag_name, 'rc') && !contains(inputs.tag_name, 'beta') }}
+        if: ${{ steps.tag_channel.outputs.is_latest_stable == 'true' }}
         run: |
           docker buildx imagetools create \
             -t trustedsignatures/documenso:latest \
             trustedsignatures/documenso:${{ inputs.tag_name }}
 
       - name: Tag rc for release candidates
-        if: contains(inputs.tag_name, 'rc')
+        if: ${{ steps.tag_channel.outputs.is_rc == 'true' }}
         run: |
           docker buildx imagetools create \
             -t trustedsignatures/documenso:rc \

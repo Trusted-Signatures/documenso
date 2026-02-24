@@ -86,6 +86,24 @@ patch_present_on_head() {
   git apply --reverse --check "$patch" >/dev/null 2>&1
 }
 
+branch_has_ts_patch_markers() {
+  local markers=0
+
+  if [ -f "packages/signing/transports/trusted-signatures.ts" ]; then
+    markers=$((markers + 1))
+  fi
+
+  if [ -f "packages/signing/index.ts" ] && grep -q "trusted-signatures" "packages/signing/index.ts"; then
+    markers=$((markers + 1))
+  fi
+
+  if [ -f ".env.example" ] && grep -q "NEXT_PRIVATE_SIGNING_TS_API_KEY" ".env.example"; then
+    markers=$((markers + 1))
+  fi
+
+  [ "$markers" -ge 2 ]
+}
+
 should_process_base_tag() {
   local base_tag="$1"
   local min_version="$2"
@@ -190,6 +208,7 @@ patched_count=0
 retagged_count=0
 skipped_count=0
 failed_count=0
+push_refspecs=()
 
 for ts_tag in "${TS_TAGS[@]}"; do
   checked_count=$((checked_count + 1))
@@ -226,6 +245,9 @@ for ts_tag in "${TS_TAGS[@]}"; do
   if patch_present_on_head "$PATCH_FILE"; then
     had_patch=1
     log "  Patch already present on ${branch}."
+  elif branch_has_ts_patch_markers; then
+    had_patch=1
+    log "  Trusted Signatures markers already present on ${branch}; skipping re-apply."
   else
     log "  Patch missing on ${branch}; applying."
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -235,6 +257,7 @@ for ts_tag in "${TS_TAGS[@]}"; do
       if apply_patch_commit "$PATCH_FILE"; then
         patched_count=$((patched_count + 1))
       else
+        git apply --check --verbose "$PATCH_FILE" || true
         log "  ! Patch apply failed on ${branch}. Leaving for manual resolution."
         failed_count=$((failed_count + 1))
         continue
@@ -257,11 +280,16 @@ for ts_tag in "${TS_TAGS[@]}"; do
   fi
 
   if [ "$PUSH" -eq 1 ]; then
-    log "  Pushing ${branch} and ${ts_tag} to ${REMOTE}."
-    run_cmd git push "$REMOTE" "${branch}:${branch}"
-    run_cmd git push "$REMOTE" "refs/tags/${ts_tag}" --force
+    push_refspecs+=("${branch}:${branch}")
+    push_refspecs+=("+refs/tags/${ts_tag}:refs/tags/${ts_tag}")
   fi
 done
+
+if [ "$PUSH" -eq 1 ] && [ ${#push_refspecs[@]} -gt 0 ]; then
+  log ""
+  log "Pushing ${#push_refspecs[@]} refspecs to ${REMOTE} in one command."
+  run_cmd git push "$REMOTE" "${push_refspecs[@]}"
+fi
 
 log ""
 log "Repair complete."

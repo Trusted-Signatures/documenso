@@ -37,14 +37,27 @@ jobs:
         run: |
           GIT_SHA="$(git rev-parse HEAD)"
 
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            -f ./docker/Dockerfile \
-            --progress=plain \
-            -t "trustedsignatures/documenso:$TAG_NAME" \
-            -t "trustedsignatures/documenso:$GIT_SHA" \
-            --push \
-            .
+          # Retry up to 3 times on failure
+          for i in 1 2 3; do
+            if docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              -f ./docker/Dockerfile \
+              --progress=plain \
+              -t "trustedsignatures/documenso:$TAG_NAME" \
+              -t "trustedsignatures/documenso:$GIT_SHA" \
+              --push \
+              .; then
+              echo "Build succeeded on attempt $i"
+              break
+            else
+              if [ $i -eq 3 ]; then
+                echo "Build failed after 3 attempts"
+                exit 1
+              fi
+              echo "Build failed on attempt $i, retrying..."
+              sleep 30
+            fi
+          done
 
       - name: Tag latest for stable releases
         if: ${{ !contains(inputs.tag_name, 'rc') && !contains(inputs.tag_name, 'beta') }}

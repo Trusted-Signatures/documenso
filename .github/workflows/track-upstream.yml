@@ -155,16 +155,21 @@ jobs:
           echo "status=ok" >> "$GITHUB_OUTPUT"
 
       - name: Create PR when conflicts occur
-        if: steps.run.outputs.status == 'conflict'
+        if: steps.run.outputs.status == 'conflict' && steps.run.outputs.tag != '' && steps.run.outputs.branch != ''
         uses: actions/github-script@v7
         env:
-          TAG: ${{ steps.run.outputs.conflict_tag }}
-          BRANCH: ${{ steps.run.outputs.conflict_branch }}
+          TAG: ${{ steps.run.outputs.tag }}
+          BRANCH: ${{ steps.run.outputs.branch }}
         with:
           script: |
-            const tag   = process.env.TAG;
-            const br    = process.env.BRANCH;
+            const tag = process.env.TAG?.trim();
+            const br = process.env.BRANCH?.trim();
             const { owner, repo } = context.repo;
+
+            if (!tag || !br) {
+              core.setFailed(`Missing conflict context (TAG='${tag}', BRANCH='${br}')`);
+              return;
+            }
 
             // If there isn't already an open PR from this branch, create one.
             const prs = await github.rest.pulls.list({
